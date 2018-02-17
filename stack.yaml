@@ -1,0 +1,5 @@
+resolver: lts-10.5
+packages:
+- '.'
+extra-deps:
+- wai-handler-fastcgi-3.0.0.2
