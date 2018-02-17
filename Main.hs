@@ -1,8 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 import           Control.Arrow (first)
-import           Control.Exception (handleJust)
-import           Control.Monad (guard, join, when, (<=<))
+import           Control.Exception (bracket, handleJust)
+import           Control.Monad ((<=<), forM_, guard, join, when)
 import           Control.Monad.Error.Class (throwError)
 import           Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
@@ -16,18 +16,39 @@ import           Network.HTTP.Types.Status (ok200, notModified304, badRequest400
 import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.FastCGI as Wai
 import qualified System.Posix.ByteString as Posix
-import           System.Posix.FilePath (takeExtension)
+import           System.Posix.FilePath ((</>), takeExtension, splitFileName)
 import           System.IO (hPutStrLn, stderr)
 import qualified System.IO.Error as IOE
 import qualified Text.Blaze.Html as Html
 import qualified Text.Blaze.Html.Renderer.Utf8 as Html
+import qualified Text.Blaze.Html5 as H
 import qualified Text.Pandoc as Pandoc
 
-import Waimwork.HTTP
-import Waimwork.Result
+import qualified Waimwork.Blaze as Html
+import           Waimwork.HTTP (formatHTTPDate, parseHTTPDate)
+import           Waimwork.Result (result, resultApplication)
 
 unRawFilePath :: Posix.RawFilePath -> FilePath
 unRawFilePath = BSC.unpack -- XXX unsafe encoding
+
+statFile :: Posix.RawFilePath -> IO (Maybe Posix.FileStatus)
+statFile f = handleJust (guard . IOE.isDoesNotExistError) (\() -> return Nothing) $
+  Just <$> Posix.getFileStatus f
+
+indexFile :: Posix.RawFilePath
+indexFile = "index.auto"
+
+readDirPlus :: Posix.RawFilePath -> IO [(Posix.RawFilePath, Posix.FileStatus)]
+readDirPlus dir = bracket (Posix.openDirStream dir) Posix.closeDirStream rdp where
+  rdp ds = loop id where
+    loop l = do
+      name <- Posix.readDirStream ds
+      case BSC.uncons name of
+        Nothing -> return $ l []
+        Just ('.', _) -> loop l
+        _ | name == indexFile -> loop l
+        _ -> loop . maybe l ((l .) . (:) . (,) name) =<<
+          statFile (dir </> name)
 
 pandoc :: Posix.RawFilePath -> String -> IO (Either Pandoc.PandocError Html.Html)
 pandoc path fmt = Pandoc.runIO $ do
@@ -37,41 +58,59 @@ pandoc path fmt = Pandoc.runIO $ do
     Right (Pandoc.ByteStringReader f, e) -> liftIO (BSL.readFile $ unRawFilePath path) >>= f Pandoc.def{ Pandoc.readerExtensions = e }
   Pandoc.writeHtml5 Pandoc.def doc
 
-outputType :: MT.MediaType
-outputType = "text" MT.// "html" MT./: ("charset","utf-8")
+htmlType :: MT.MediaType
+htmlType = "text" MT.// "html" MT./: ("charset","utf-8")
 
 fileType :: BS.ByteString -> (Maybe String, MT.MediaType)
 fileType ".md" = (Just "markdown", "text" MT.// "markdown")
 fileType _ = (Nothing, "application" MT.// "octet-stream")
 
+autoIndex :: Posix.RawFilePath -> [(Posix.RawFilePath, Posix.FileStatus)] -> Html.Html
+autoIndex path dir = H.docTypeHtml $ do
+  H.head $ do
+    H.title $ Html.byteString path
+  H.body $ do
+    H.table $ do
+      H.thead $ do
+        H.tr $ do
+          H.th "name"
+      H.tbody $ do
+        forM_ dir $ \(name, stat) -> do
+          H.tr $ do
+            H.td $ Html.byteString name
+
 app :: Wai.Request -> IO Wai.Response
 app req = do
   filename <- maybe (result $ Wai.responseLBS badRequest400 [] "") return $ header "SCRIPT_FILENAME"
-  stat <- handleJust (guard . IOE.isDoesNotExistError) (\() -> result $ Wai.responseLBS notFound404 [] "") $
-    Posix.getFileStatus filename
-  let modtime = posixSecondsToUTCTime $ Posix.modificationTimeHiRes stat
-  when (any (modtime <=) $ parseHTTPDate =<< header hIfModifiedSince) $
-    result $ Wai.responseLBS notModified304 [] ""
-  let (pt, mt) =
-        first (>>= \pt' -> do
-          accept <- header hAccept
-          guard $ all (`notElem` [Nothing, Just "1"]) $ query "raw"
-          join $ MT.mapAcceptMedia [(mt, Nothing), (outputType, Just pt')] accept)
-        $ fileType $ takeExtension filename
-  html <- maybe
-    (return Nothing)
-    (either
-      (\e -> Nothing <$ hPutStrLn stderr (show filename ++ ": " ++ show e))
-      (return . Just) <=< pandoc filename)
-    pt
-  let headers ct =
-        [ (hContentType, MT.renderHeader ct)
-        , (hLastModified, formatHTTPDate modtime)
-        ]
-  return $ maybe
-    (Wai.responseFile ok200 (headers mt) (unRawFilePath filename) Nothing)
-    (Wai.responseBuilder ok200 (headers outputType) . Html.renderHtmlBuilder)
-    html
+  stat <- maybe (result $ Wai.responseLBS notFound404 [] "") return =<< statFile filename
+  let (dirname, basename) = splitFileName filename
+  if Posix.fileSize stat == 0 && basename == indexFile then
+    Wai.responseBuilder ok200 [(hContentType, MT.renderHeader htmlType)] . Html.renderHtmlBuilder .
+      autoIndex dirname <$> readDirPlus dirname
+  else do
+    let modtime = posixSecondsToUTCTime $ Posix.modificationTimeHiRes stat
+    when (any (modtime <=) $ parseHTTPDate =<< header hIfModifiedSince) $
+      result $ Wai.responseLBS notModified304 [] ""
+    let (pt, mt) =
+          first (>>= \pt' -> do
+            accept <- header hAccept
+            guard $ all (`notElem` [Nothing, Just "1"]) $ query "raw"
+            join $ MT.mapAcceptMedia [(mt, Nothing), (htmlType, Just pt')] accept)
+          $ fileType $ takeExtension filename
+    html <- maybe
+      (return Nothing)
+      (either
+        (\e -> Nothing <$ hPutStrLn stderr (show filename ++ ": " ++ show e))
+        (return . Just) <=< pandoc filename)
+      pt
+    let headers ct =
+          [ (hContentType, MT.renderHeader ct)
+          , (hLastModified, formatHTTPDate modtime)
+          ]
+    return $ maybe
+      (Wai.responseFile ok200 (headers mt) (unRawFilePath filename) Nothing)
+      (Wai.responseBuilder ok200 (headers htmlType) . Html.renderHtmlBuilder)
+      html
   where
   query v = lookup v $ Wai.queryString req
   header n = lookup n $ Wai.requestHeaders req

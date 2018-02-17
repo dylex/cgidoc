@@ -1,5 +1,14 @@
 resolver: lts-10.5
 packages:
 - '.'
+- location:
+    git: git://github.com/dylex/waimwork
+    commit: master
+  extra-dep: true
 extra-deps:
 - wai-handler-fastcgi-3.0.0.2
+- web-inv-route-0.1.1
+flags:
+  web-inv-route:
+    snap: false
+    happstack: false
