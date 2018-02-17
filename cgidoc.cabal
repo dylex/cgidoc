@@ -21,6 +21,7 @@ executable cgidoc
     , attoparsec
     , blaze-html
     , bytestring
+    , http-media
     , http-types
     , mtl
     , pandoc
