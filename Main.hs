@@ -2,15 +2,16 @@
 
 import           Control.Arrow (left)
 import           Control.Exception (handleJust)
-import           Control.Monad (guard)
+import           Control.Monad (guard, when)
 import           Control.Monad.Error.Class (throwError)
 import           Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Lazy.Char8 as BSLC
 import qualified Data.Text.IO as T.IO
-import           Network.HTTP.Types.Header (hContentType)
-import           Network.HTTP.Types.Status (ok200, badRequest400, notFound404, internalServerError500)
+import           Data.Time.Clock.POSIX (posixSecondsToUTCTime)
+import           Network.HTTP.Types.Header (hContentType, hIfModifiedSince, hLastModified)
+import           Network.HTTP.Types.Status (ok200, notModified304, badRequest400, notFound404, internalServerError500)
 import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.FastCGI as Wai
 import qualified System.Posix.ByteString as Posix
@@ -20,6 +21,7 @@ import qualified Text.Blaze.Html as Html
 import qualified Text.Blaze.Html.Renderer.Utf8 as Html
 import qualified Text.Pandoc as Pandoc
 
+import Waimwork.HTTP
 import Waimwork.Result
 
 unRawFilePath :: Posix.RawFilePath -> FilePath
@@ -38,12 +40,18 @@ app req = do
   filename <- maybe (result $ Wai.responseLBS badRequest400 [] "") return $ header "SCRIPT_FILENAME"
   stat <- handleJust (guard . IOE.isDoesNotExistError) (\() -> result $ Wai.responseLBS notFound404 [] "") $
     Posix.getFileStatus filename
+  let modtime = posixSecondsToUTCTime $ Posix.modificationTimeHiRes stat
+  when (any (modtime <=) $ parseHTTPDate =<< header hIfModifiedSince) $
+    result $ Wai.responseLBS notModified304 [] ""
   html <- case takeExtension filename of
     ".md" -> left show <$> pandoc "markdown" filename
     _ -> return $ Left "unknown file extension"
   return $ either
     (Wai.responseLBS internalServerError500 [] . BSLC.pack)
-    (Wai.responseBuilder ok200 [(hContentType, "text/html;charset=utf-8")] . Html.renderHtmlBuilder)
+    (Wai.responseBuilder ok200
+      [ (hContentType, "text/html;charset=utf-8")
+      , (hLastModified, formatHTTPDate modtime)
+      ] . Html.renderHtmlBuilder)
     html
   where
   header n = lookup n headers
