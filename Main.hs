@@ -22,7 +22,6 @@ import qualified System.Posix.ByteString as Posix
 import           System.Posix.FilePath ((</>), takeExtension, splitFileName)
 import           System.IO (hPutStrLn, stderr)
 import qualified System.IO.Error as IOE
-import qualified Text.Blaze.Html as Html
 import qualified Text.Blaze.Html.Renderer.Utf8 as Html
 import qualified Text.Blaze.Html5 as H
 import qualified Text.Blaze.Html5.Attributes as HA
@@ -54,7 +53,7 @@ readDirPlus dir = bracket (Posix.openDirStream dir) Posix.closeDirStream rdp whe
         _ -> loop . maybe l ((l .) . (:) . (,) name) =<<
           statFile (dir </> name)
 
-pandoc :: Posix.RawFilePath -> String -> IO (Either Pandoc.PandocError Html.Html)
+pandoc :: Posix.RawFilePath -> String -> IO (Either Pandoc.PandocError H.Html)
 pandoc path fmt = Pandoc.runIO $ do
   doc <- case Pandoc.getReader fmt of
     Left e -> throwError $ Pandoc.PandocParseError $ "unknown format: " ++ e
@@ -67,6 +66,8 @@ htmlType = "text" MT.// "html" MT./: ("charset","utf-8")
 
 fileType :: BS.ByteString -> (Maybe String, MT.MediaType)
 fileType ".md" = (Just "markdown", "text" MT.// "markdown")
+fileType ".html" = (Nothing, "text" MT.// "html")
+fileType ".htm" = (Nothing, "text" MT.// "html")
 fileType _ = (Nothing, "application" MT.// "octet-stream")
 
 byteSize :: Integral a => a -> String
@@ -81,14 +82,17 @@ byteSize = choose " KMGTPE" . realToFrac where
   sf :: Int -> Float -> ShowS
   sf = showFFloat . Just
 
-autoIndex :: Posix.RawFilePath -> [(Posix.RawFilePath, Posix.FileStatus)] -> Html.Html
-autoIndex path dir = H.docTypeHtml $ do
+autoIndex :: Wai.Request -> [(Posix.RawFilePath, Posix.FileStatus)] -> H.Html
+autoIndex req dir = H.docTypeHtml $ do
   H.head $ do
-    H.title $ Html.byteString path
+    mapM_ (H.title . Html.byteString) $ lookup "REQUEST_URI" $ Wai.requestHeaders req
     H.link
       H.! HA.rel "stylesheet"
       H.! HA.type_ "text/css"
       H.! HA.href (dtcdn <> "css")
+    H.style
+      H.! HA.type_ "text/css"
+      $ ".fixed{font-family:monospace}"
     H.script
       H.! HA.type_ "text/javascript"
       H.! HA.src (dtcdn <> "js")
@@ -100,17 +104,22 @@ autoIndex path dir = H.docTypeHtml $ do
     H.table H.! HA.id "dir" $ do
       H.thead $ do
         H.tr $ do
-          H.th "name"
-          H.th "size"
+          H.th H.! H.dataAttribute "class-name" "fixed" $ "name"
+          H.th H.! H.dataAttribute "class-name" "dt-body-right fixed" $ "size"
           H.th "time"
       H.tbody $ do
         forM_ dir $ \(name, stat) -> do
+          let
+            name'
+              | Posix.isDirectory stat = name `BSC.snoc` '/'
+              | otherwise = name
+            mtime = Posix.modificationTimeHiRes stat
           H.tr $ do
-            H.td $ Html.byteString name
-            H.td H.! Html.dataAttribute "order" (Html.stringValue $ show $ Posix.fileSize stat) $
-              Html.string $ byteSize $ Posix.fileSize stat
-            H.td H.! Html.dataAttribute "order" (Html.stringValue $ show $ (realToFrac $ Posix.modificationTimeHiRes stat :: Milli)) $
-              Html.string $ show $ posixSecondsToUTCTime $ Posix.modificationTimeHiRes stat
+            H.td $ H.a H.! HA.href (Html.byteStringValue name) $ Html.byteString name'
+            H.td H.! H.dataAttribute "order" (H.stringValue $ show $ Posix.fileSize stat) $
+              H.string $ byteSize $ Posix.fileSize stat
+            H.td H.! H.dataAttribute "order" (H.stringValue $ show $ (realToFrac mtime :: Milli)) $
+              H.string $ show $ posixSecondsToUTCTime mtime
   where
   dtcdn = "https://cdn.datatables.net/v/dt/jq-3.2.1/dt-1.10.16/datatables.min."
 
@@ -121,7 +130,7 @@ app req = do
   let (dirname, basename) = splitFileName filename
   if Posix.fileSize stat == 0 && basename == indexFile then
     Wai.responseBuilder ok200 [(hContentType, MT.renderHeader htmlType)] . Html.renderHtmlBuilder .
-      autoIndex dirname <$> readDirPlus dirname
+      autoIndex req <$> readDirPlus dirname
   else do
     let modtime = posixSecondsToUTCTime $ Posix.modificationTimeHiRes stat
     when (any (modtime <=) $ parseHTTPDate =<< header hIfModifiedSince) $
