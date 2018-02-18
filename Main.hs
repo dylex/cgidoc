@@ -8,6 +8,8 @@ import           Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
+import           Data.Fixed (Milli)
+import           Data.Monoid ((<>))
 import qualified Data.Text.IO as T.IO
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import qualified Network.HTTP.Media as MT
@@ -15,6 +17,7 @@ import           Network.HTTP.Types.Header (hAccept, hContentType, hIfModifiedSi
 import           Network.HTTP.Types.Status (ok200, notModified304, badRequest400, notFound404)
 import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.FastCGI as Wai
+import           Numeric (showFFloat)
 import qualified System.Posix.ByteString as Posix
 import           System.Posix.FilePath ((</>), takeExtension, splitFileName)
 import           System.IO (hPutStrLn, stderr)
@@ -22,6 +25,7 @@ import qualified System.IO.Error as IOE
 import qualified Text.Blaze.Html as Html
 import qualified Text.Blaze.Html.Renderer.Utf8 as Html
 import qualified Text.Blaze.Html5 as H
+import qualified Text.Blaze.Html5.Attributes as HA
 import qualified Text.Pandoc as Pandoc
 
 import qualified Waimwork.Blaze as Html
@@ -65,19 +69,50 @@ fileType :: BS.ByteString -> (Maybe String, MT.MediaType)
 fileType ".md" = (Just "markdown", "text" MT.// "markdown")
 fileType _ = (Nothing, "application" MT.// "octet-stream")
 
+byteSize :: Integral a => a -> String
+byteSize = choose " KMGTPE" . realToFrac where
+  choose (_:p@(_:_)) x | x >= 1000 = choose p (x / 1024)
+  choose (' ':_) x = sf 0 x "B"
+  choose ~(c:_) x
+    | x >= 1000 = sf 0 x [c,'B']
+    | x >= 100  = sf 1 x [c,'B']
+    | x >= 10   = sf 2 x [c,'B']
+    | otherwise = sf 3 x [c,'B']
+  sf :: Int -> Float -> ShowS
+  sf = showFFloat . Just
+
 autoIndex :: Posix.RawFilePath -> [(Posix.RawFilePath, Posix.FileStatus)] -> Html.Html
 autoIndex path dir = H.docTypeHtml $ do
   H.head $ do
     H.title $ Html.byteString path
+    H.link
+      H.! HA.rel "stylesheet"
+      H.! HA.type_ "text/css"
+      H.! HA.href (dtcdn <> "css")
+    H.script
+      H.! HA.type_ "text/javascript"
+      H.! HA.src (dtcdn <> "js")
+      $ mempty
+    H.script
+      H.! HA.type_ "text/javascript"
+      $ "$(function(){$('#dir').DataTable({paging:false});})"
   H.body $ do
-    H.table $ do
+    H.table H.! HA.id "dir" $ do
       H.thead $ do
         H.tr $ do
           H.th "name"
+          H.th "size"
+          H.th "time"
       H.tbody $ do
         forM_ dir $ \(name, stat) -> do
           H.tr $ do
             H.td $ Html.byteString name
+            H.td H.! Html.dataAttribute "order" (Html.stringValue $ show $ Posix.fileSize stat) $
+              Html.string $ byteSize $ Posix.fileSize stat
+            H.td H.! Html.dataAttribute "order" (Html.stringValue $ show $ (realToFrac $ Posix.modificationTimeHiRes stat :: Milli)) $
+              Html.string $ show $ posixSecondsToUTCTime $ Posix.modificationTimeHiRes stat
+  where
+  dtcdn = "https://cdn.datatables.net/v/dt/jq-3.2.1/dt-1.10.16/datatables.min."
 
 app :: Wai.Request -> IO Wai.Response
 app req = do
