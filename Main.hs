@@ -66,6 +66,9 @@ htmlType = "text" MT.// "html" MT./: ("charset","utf-8")
 
 fileType :: BS.ByteString -> (Maybe String, MT.MediaType)
 fileType ".md" = (Just "markdown", "text" MT.// "markdown")
+fileType ".rst" = (Just "rst", "text" MT.// "x-rst")
+fileType ".tex" = (Just "latex", "application" MT.// "x-latex")
+fileType ".docx" = (Just "docx", "application" MT.// "vnd.openxmlformats-officedocument.wordprocessingml.document")
 fileType ".html" = (Nothing, "text" MT.// "html")
 fileType ".htm" = (Nothing, "text" MT.// "html")
 fileType _ = (Nothing, "application" MT.// "octet-stream")
@@ -98,24 +101,55 @@ autoIndex req dir = H.docTypeHtml $ do
       H.! HA.src (dtcdn <> "js")
       $ mempty
     H.script
+      H.! HA.defer mempty
+      H.! HA.src "https://use.fontawesome.com/releases/v5.0.6/js/all.js"
+      $ mempty
+    H.script
       H.! HA.type_ "text/javascript"
       $ "$(function(){$('#dir').DataTable({paging:false});})"
   H.body $ do
     H.table H.! HA.id "dir" $ do
       H.thead $ do
         H.tr $ do
+          H.th "type"
           H.th H.! H.dataAttribute "class-name" "fixed" $ "name"
           H.th H.! H.dataAttribute "class-name" "dt-body-right fixed" $ "size"
           H.th "time"
       H.tbody $ do
         forM_ dir $ \(name, stat) -> do
           let
-            name'
-              | Posix.isDirectory stat = name `BSC.snoc` '/'
-              | otherwise = name
+            isdir = Posix.isDirectory stat
             mtime = Posix.modificationTimeHiRes stat
+            ext = takeExtension name
+            name'
+              | isdir = name `BSC.snoc` '/'
+              | otherwise = name
+            icon _ | isdir = "folder-open"
+            icon ".txt" = "file-alt"
+            icon ".html" = "file-alt"
+            icon ".htm" = "file-alt"
+            icon ".md"  = "file-alt"
+            icon ".rst" = "file-alt"
+            icon ".tex" = "file-alt"
+            icon ".docx" = "file-alt"
+            icon ".pdf" = "file-pdf"
+            icon ".png" = "file-image"
+            icon ".gif" = "file-image"
+            icon ".c"   = "file-code"
+            icon ".cxx" = "file-code"
+            icon ".cpp" = "file-code"
+            icon ".h"   = "file-code"
+            icon ".py"  = "file-code"
+            icon ".tar" = "file-archive"
+            icon ".zip" = "file-archive"
+            icon ".gz"  = "file-archive"
+            icon ".tgz" = "file-archive"
+            icon _ = "file"
           H.tr $ do
-            H.td $ H.a H.! HA.href (Html.byteStringValue name) $ Html.byteString name'
+            H.td H.! H.dataAttribute "order" (if isdir then mempty else if BS.null ext then "." else Html.byteStringValue ext) $
+              H.span H.! HA.class_ ("fa fa-" <> icon ext) $ mempty
+            H.td $
+              H.a H.! HA.href (Html.byteStringValue name) $ Html.byteString name'
             H.td H.! H.dataAttribute "order" (H.stringValue $ show $ Posix.fileSize stat) $
               H.string $ byteSize $ Posix.fileSize stat
             H.td H.! H.dataAttribute "order" (H.stringValue $ show $ (realToFrac mtime :: Milli)) $
