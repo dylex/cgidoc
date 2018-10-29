@@ -119,6 +119,8 @@ autoIndex req dir = H.docTypeHtml $ do
         forM_ dir $ \(name, stat) -> do
           let
             isdir = Posix.isDirectory stat
+            size | isdir = Nothing
+                 | otherwise = Just $ Posix.fileSize stat
             mtime = Posix.modificationTimeHiRes stat
             ext = takeExtension name
             name'
@@ -150,8 +152,8 @@ autoIndex req dir = H.docTypeHtml $ do
               H.span H.! HA.class_ ("fa fa-" <> icon ext) $ mempty
             H.td $
               H.a H.! HA.href (Html.byteStringValue name) $ Html.byteString name'
-            H.td H.! H.dataAttribute "order" (H.stringValue $ show $ Posix.fileSize stat) $
-              H.string $ byteSize $ Posix.fileSize stat
+            H.td H.! H.dataAttribute "order" (foldMap (H.stringValue . show) size) $
+              mapM_ (H.string . byteSize) size
             H.td H.! H.dataAttribute "order" (H.stringValue $ show $ (realToFrac mtime :: Milli)) $
               H.string $ show $ posixSecondsToUTCTime mtime
   where
