@@ -19,6 +19,7 @@ executable cgidoc
     , attoparsec
     , blaze-html
     , bytestring
+    , case-insensitive
     , http-media
     , http-types
     , mtl

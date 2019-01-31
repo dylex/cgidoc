@@ -1,14 +1,15 @@
-resolver: lts-12.16
+resolver: lts-13.5
 packages:
 - '.'
 - location:
     git: git://github.com/dylex/waimwork
-    commit: 08ce12a8fbeffd7efbf5e1b1b2748893e58f7fc4
+    commit: 5c6c01f1b3c3f69bae7cc8c409c9a2928dc4c53d
   extra-dep: true
 extra-deps:
-- posix-paths-0.2.1.5
+- posix-paths-0.2.1.6
 - wai-handler-fastcgi-3.0.0.2
-- web-inv-route-0.1.2.1
+- web-inv-route-0.1.2.2
+- postgresql-typed-0.5.3.0
 flags:
   web-inv-route:
     snap: false

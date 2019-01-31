@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+import           Control.Applicative ((<|>))
 import           Control.Arrow (first)
 import           Control.Exception (bracket, handleJust)
 import           Control.Monad ((<=<), forM_, guard, join, when)
@@ -8,6 +9,7 @@ import           Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
+import qualified Data.CaseInsensitive as CI
 import           Data.Fixed (Milli)
 import           Data.Monoid ((<>))
 import qualified Data.Text.IO as T.IO
@@ -29,6 +31,7 @@ import qualified Text.Pandoc as Pandoc
 
 import qualified Waimwork.Blaze as Html
 import           Waimwork.HTTP (formatHTTPDate, parseHTTPDate)
+import           Waimwork.Response (okResponse)
 import           Waimwork.Result (result, resultApplication)
 
 unRawFilePath :: Posix.RawFilePath -> FilePath
@@ -61,6 +64,13 @@ pandoc path fmt = Pandoc.runIO $ do
     Right (Pandoc.ByteStringReader f, e) -> liftIO (BSL.readFile $ unRawFilePath path) >>= f Pandoc.def{ Pandoc.readerExtensions = e }
   Pandoc.writeHtml5 Pandoc.def doc
 
+baseHtml :: Wai.Request -> H.Html -> H.Html -> H.Html
+baseHtml req hd bd = H.docTypeHtml $ do
+  H.head $ do
+    mapM_ (H.title . Html.byteString) $ lookup "REQUEST_URI" $ Wai.requestHeaders req
+    hd
+  H.body bd
+
 htmlType :: MT.MediaType
 htmlType = "text" MT.// "html" MT./: ("charset","utf-8")
 
@@ -86,9 +96,7 @@ byteSize = choose " KMGTPE" . realToFrac where
   sf = showFFloat . Just
 
 autoIndex :: Wai.Request -> [(Posix.RawFilePath, Posix.FileStatus)] -> H.Html
-autoIndex req dir = H.docTypeHtml $ do
-  H.head $ do
-    mapM_ (H.title . Html.byteString) $ lookup "REQUEST_URI" $ Wai.requestHeaders req
+autoIndex req dir = baseHtml req (do
     H.link
       H.! HA.rel "stylesheet"
       H.! HA.type_ "text/css"
@@ -106,8 +114,8 @@ autoIndex req dir = H.docTypeHtml $ do
       $ mempty
     H.script
       H.! HA.type_ "text/javascript"
-      $ "$(function(){$('#dir').DataTable({paging:false});})"
-  H.body $ do
+      $ "$(function(){$('#dir').DataTable({paging:false});})")
+  $ do
     H.table H.! HA.id "dir" $ do
       H.thead $ do
         H.tr $ do
@@ -157,16 +165,15 @@ autoIndex req dir = H.docTypeHtml $ do
             H.td H.! H.dataAttribute "order" (H.stringValue $ show $ (realToFrac mtime :: Milli)) $
               H.string $ show $ posixSecondsToUTCTime mtime
   where
-  dtcdn = "https://cdn.datatables.net/v/dt/jq-3.2.1/dt-1.10.16/datatables.min."
+  dtcdn = "https://cdn.datatables.net/v/dt/jq-3.3.1/dt-1.10.18/datatables.min."
 
 app :: Wai.Request -> IO Wai.Response
 app req = do
-  filename <- maybe (result $ Wai.responseLBS badRequest400 [] "") return $ header "SCRIPT_FILENAME"
+  filename <- maybe (result $ Wai.responseLBS badRequest400 [] "") return $ header "REQUEST_FILENAME" <|> header "SCRIPT_FILENAME"
   stat <- maybe (result $ Wai.responseLBS notFound404 [] "") return =<< statFile filename
   let (dirname, basename) = splitFileName filename
   if Posix.fileSize stat == 0 && basename == indexFile then
-    Wai.responseBuilder ok200 [(hContentType, MT.renderHeader htmlType)] . Html.renderHtmlBuilder .
-      autoIndex req <$> readDirPlus dirname
+    okResponse [] . autoIndex req <$> readDirPlus dirname
   else do
     let modtime = posixSecondsToUTCTime $ Posix.modificationTimeHiRes stat
     when (any (modtime <=) $ parseHTTPDate =<< header hIfModifiedSince) $
@@ -181,7 +188,7 @@ app req = do
       (return Nothing)
       (either
         (\e -> Nothing <$ hPutStrLn stderr (show filename ++ ": " ++ show e))
-        (return . Just) <=< pandoc filename)
+        (return . Just . baseHtml req mempty) <=< pandoc filename)
       pt
     let headers ct =
           [ (hContentType, MT.renderHeader ct)
@@ -194,6 +201,9 @@ app req = do
   where
   query v = lookup v $ Wai.queryString req
   header n = lookup n $ Wai.requestHeaders req
+
+_apptest :: Wai.Request -> IO Wai.Response
+_apptest = return . okResponse [] . BSC.unlines . map (\(h,v) -> CI.original h <> "=" <> v) . Wai.requestHeaders
 
 main :: IO ()
 main = Wai.run $ resultApplication app
