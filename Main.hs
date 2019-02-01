@@ -14,6 +14,7 @@ import           Data.Fixed (Milli)
 import           Data.Monoid ((<>))
 import qualified Data.Text.IO as T.IO
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime)
+import           Data.Time.Format (formatTime, defaultTimeLocale)
 import qualified Network.HTTP.Media as MT
 import           Network.HTTP.Types.Header (hAccept, hContentType, hIfModifiedSince, hLastModified)
 import           Network.HTTP.Types.Status (ok200, notModified304, badRequest400, notFound404)
@@ -44,16 +45,20 @@ statFile f = handleJust (guard . IOE.isDoesNotExistError) (\() -> return Nothing
 indexFile :: Posix.RawFilePath
 indexFile = "index.auto"
 
+maxFiles :: Int
+maxFiles = 1000
+
 readDirPlus :: Posix.RawFilePath -> IO [(Posix.RawFilePath, Posix.FileStatus)]
 readDirPlus dir = bracket (Posix.openDirStream dir) Posix.closeDirStream rdp where
-  rdp ds = loop id where
-    loop l = do
+  rdp ds = loop maxFiles id where
+    loop 0 l = return $ l []
+    loop n l = do
       name <- Posix.readDirStream ds
       case BSC.uncons name of
         Nothing -> return $ l []
-        Just ('.', _) -> loop l
-        _ | name == indexFile -> loop l
-        _ -> loop . maybe l ((l .) . (:) . (,) name) =<<
+        Just ('.', _) -> loop n l
+        _ | name == indexFile -> loop n l
+        _ -> loop (pred n) . maybe l ((l .) . (:) . (,) name) =<<
           statFile (dir </> name)
 
 pandoc :: Posix.RawFilePath -> String -> IO (Either Pandoc.PandocError H.Html)
@@ -110,7 +115,7 @@ autoIndex req dir = baseHtml req (do
       $ mempty
     H.script
       H.! HA.defer mempty
-      H.! HA.src "https://use.fontawesome.com/releases/v5.0.6/js/all.js"
+      H.! HA.src "https://use.fontawesome.com/releases/v5.7.0/js/all.js"
       $ mempty
     H.script
       H.! HA.type_ "text/javascript"
@@ -119,11 +124,16 @@ autoIndex req dir = baseHtml req (do
     H.table H.! HA.id "dir" $ do
       H.thead $ do
         H.tr $ do
-          H.th "type"
+          H.th H.! H.dataAttribute "width" "20px" H.! H.dataAttribute "class-name" "dt-body-right" $ mempty
           H.th H.! H.dataAttribute "class-name" "fixed" $ "name"
           H.th H.! H.dataAttribute "class-name" "dt-body-right fixed" $ "size"
           H.th "time"
       H.tbody $ do
+        H.tr $ do
+          H.td H.! H.dataAttribute "order" mempty $ H.span H.! HA.class_ "fas fa-folder" $ mempty
+          H.td $ H.a H.! HA.href "../" $ "../"
+          H.td mempty
+          H.td mempty
         forM_ dir $ \(name, stat) -> do
           let
             isdir = Posix.isDirectory stat
@@ -136,12 +146,13 @@ autoIndex req dir = baseHtml req (do
               | otherwise = name
             icon _ | isdir = "folder-open"
             icon ".txt" = "file-alt"
-            icon ".html" = "file-alt"
+            icon ".html"= "file-alt"
             icon ".htm" = "file-alt"
             icon ".md"  = "file-alt"
             icon ".rst" = "file-alt"
             icon ".tex" = "file-alt"
-            icon ".docx" = "file-alt"
+            icon ".doc" = "file-word"
+            icon ".docx"= "file-word"
             icon ".pdf" = "file-pdf"
             icon ".png" = "file-image"
             icon ".gif" = "file-image"
@@ -150,20 +161,23 @@ autoIndex req dir = baseHtml req (do
             icon ".cpp" = "file-code"
             icon ".h"   = "file-code"
             icon ".py"  = "file-code"
+            icon ".csv" = "file-excel"
+            icon ".xls" = "file-excel"
+            icon ".xlsx"= "file-excel"
             icon ".tar" = "file-archive"
             icon ".zip" = "file-archive"
             icon ".gz"  = "file-archive"
             icon ".tgz" = "file-archive"
             icon _ = "file"
           H.tr $ do
-            H.td H.! H.dataAttribute "order" (if isdir then mempty else if BS.null ext then "." else Html.byteStringValue ext) $
-              H.span H.! HA.class_ ("fa fa-" <> icon ext) $ mempty
+            H.td H.! H.dataAttribute "order" (if isdir then "-" else if BS.null ext then "." else Html.byteStringValue ext) $
+              H.span H.! HA.class_ ("fas fa-" <> icon ext) $ mempty
             H.td $
-              H.a H.! HA.href (Html.byteStringValue name) $ Html.byteString name'
+              H.a H.! HA.href (Html.byteStringValue name') $ Html.byteString name'
             H.td H.! H.dataAttribute "order" (foldMap (H.stringValue . show) size) $
               mapM_ (H.string . byteSize) size
             H.td H.! H.dataAttribute "order" (H.stringValue $ show $ (realToFrac mtime :: Milli)) $
-              H.string $ show $ posixSecondsToUTCTime mtime
+              H.string $ formatTime defaultTimeLocale "%F %R %Z" $ posixSecondsToUTCTime mtime
   where
   dtcdn = "https://cdn.datatables.net/v/dt/jq-3.3.1/dt-1.10.18/datatables.min."
 
