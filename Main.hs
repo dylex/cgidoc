@@ -2,8 +2,8 @@
 
 import           Control.Applicative ((<|>))
 import           Control.Arrow (first)
-import           Control.Exception (bracket, handleJust)
-import           Control.Monad ((<=<), forM_, guard, join, when)
+import           Control.Exception (bracket)
+import           Control.Monad ((<=<), forM_, guard, join, when, mfilter)
 import           Control.Monad.Error.Class (throwError)
 import           Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
@@ -17,7 +17,7 @@ import           Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import           Data.Time.Format (formatTime, defaultTimeLocale)
 import qualified Network.HTTP.Media as MT
 import           Network.HTTP.Types.Header (hAccept, hContentType, hIfModifiedSince, hLastModified)
-import           Network.HTTP.Types.Status (ok200, notModified304, badRequest400, notFound404)
+import           Network.HTTP.Types.Status (ok200, notModified304, badRequest400, forbidden403, notFound404)
 import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.FastCGI as Wai
 import           Numeric (showFFloat)
@@ -39,14 +39,35 @@ unRawFilePath :: Posix.RawFilePath -> FilePath
 unRawFilePath = BSC.unpack -- XXX unsafe encoding
 
 statFile :: Posix.RawFilePath -> IO (Maybe Posix.FileStatus)
-statFile f = handleJust (guard . IOE.isDoesNotExistError) (\() -> return Nothing) $
-  Just <$> Posix.getFileStatus f
+statFile f
+  | BSC.length f > 1024 = return Nothing
+  | otherwise = IOE.catchIOError
+  (Just <$> Posix.getFileStatus f)
+  (\_ -> return Nothing)
 
-indexFile :: Posix.RawFilePath
-indexFile = "index.auto"
+autoIndexFiles :: [Posix.RawFilePath]
+autoIndexFiles = ["index.auto", ".index.auto", autoIndexFileRec]
+
+autoIndexFileRec :: Posix.RawFilePath
+autoIndexFileRec = "index.autorec"
+
+indexFiles :: [Posix.RawFilePath]
+indexFiles = 
+  [ "index.html"
+  , "index.htm"
+  , "index.md"
+  ] ++ autoIndexFiles ++
+  [ "README.md"
+  , "README"]
 
 maxFiles :: Int
 maxFiles = 1000
+
+statMatching :: Posix.FileStatus -> Posix.RawFilePath -> IO (Maybe Posix.FileStatus)
+statMatching match f = mfilter matches <$> statFile f where
+  matches stat =
+    Posix.deviceID  stat == Posix.deviceID  match &&
+    Posix.fileOwner stat == Posix.fileOwner match
 
 readDirPlus :: Posix.RawFilePath -> IO [(Posix.RawFilePath, Posix.FileStatus)]
 readDirPlus dir = bracket (Posix.openDirStream dir) Posix.closeDirStream rdp where
@@ -57,7 +78,7 @@ readDirPlus dir = bracket (Posix.openDirStream dir) Posix.closeDirStream rdp whe
       case BSC.uncons name of
         Nothing -> return $ l []
         Just ('.', _) -> loop n l
-        _ | name == indexFile -> loop n l
+        _ | name `elem` autoIndexFiles -> loop n l
         _ -> loop (pred n) . maybe l ((l .) . (:) . (,) name) =<<
           statFile (dir </> name)
 
@@ -183,36 +204,60 @@ autoIndex req dir = baseHtml req (do
 
 app :: Wai.Request -> IO Wai.Response
 app req = do
-  filename <- maybe (result $ Wai.responseLBS badRequest400 [] "") return $ header "REQUEST_FILENAME" <|> header "SCRIPT_FILENAME"
-  stat <- maybe (result $ Wai.responseLBS notFound404 [] "") return =<< statFile filename
+  filename <- maybe (result $ Wai.responseLBS badRequest400 [] "") return
+    $ header "REQUEST_FILENAME" <|> header "SCRIPT_FILENAME"
+  stat <- maybe (result $ Wai.responseLBS notFound404 [] "No such file or directory") return
+    =<< statFile filename
   let (dirname, basename) = splitFileName filename
-  if Posix.fileSize stat == 0 && basename == indexFile then
-    okResponse [] . autoIndex req <$> readDirPlus dirname
-  else do
-    let modtime = posixSecondsToUTCTime $ Posix.modificationTimeHiRes stat
-    when (any (modtime <=) $ parseHTTPDate =<< header hIfModifiedSince) $
-      result $ Wai.responseLBS notModified304 [] ""
-    let (pt, mt) =
-          first (>>= \pt' -> do
-            accept <- header hAccept
-            guard $ all (`notElem` [Nothing, Just "1"]) $ query "raw"
-            join $ MT.mapAcceptMedia [(mt, Nothing), (htmlType, Just pt')] accept)
-          $ fileType $ takeExtension filename
-    html <- maybe
-      (return Nothing)
-      (either
-        (\e -> Nothing <$ hPutStrLn stderr (show filename ++ ": " ++ show e))
-        (return . Just . baseHtml req mempty) <=< pandoc filename)
-      pt
-    let headers ct =
-          [ (hContentType, MT.renderHeader ct)
-          , (hLastModified, formatHTTPDate modtime)
-          ]
-    return $ maybe
-      (Wai.responseFile ok200 (headers mt) (unRawFilePath filename) Nothing)
-      (Wai.responseBuilder ok200 (headers htmlType) . Html.renderHtmlBuilder)
-      html
+  if BSC.null basename
+    then checkIndex stat dirname indexFiles
+    else serve filename (dirname, basename) stat
   where
+  checkIndex _ _ [] = return $ Wai.responseLBS forbidden403 [] "Permission denied"
+  checkIndex stat dir (file:files) = maybe
+    (checkIndex stat dir files)
+    (serve filename (dir, file))
+    =<< (if file == autoIndexFileRec
+      then checkParents stat dir
+      else id) (statMatching stat filename)
+    where
+    filename = dir </> file
+  checkParents stat dir pre = pre >>= maybe
+    (maybe
+      (return Nothing)
+      (\pstat -> checkParents pstat parent $
+        mfilter ((0 ==) . Posix.fileSize) <$> statMatching pstat (parent </> autoIndexFileRec))
+      =<< statMatching stat parent)
+    (return . Just)
+    where
+    parent = dir </> ".."
+  serve filename (dirname, basename) stat
+    | Posix.fileSize stat == 0 && basename `elem` autoIndexFiles =
+      okResponse [] . autoIndex req <$> readDirPlus dirname
+    | otherwise = do
+      let modtime = posixSecondsToUTCTime $ Posix.modificationTimeHiRes stat
+      when (any (modtime <=) $ parseHTTPDate =<< header hIfModifiedSince) $
+        result $ Wai.responseLBS notModified304 [] ""
+      let (pt, mt) =
+            first (>>= \pt' -> do
+              accept <- header hAccept
+              guard $ all (`notElem` [Nothing, Just "1"]) $ query "raw"
+              join $ MT.mapAcceptMedia [(mt, Nothing), (htmlType, Just pt')] accept)
+            $ fileType $ takeExtension filename
+      html <- maybe
+        (return Nothing)
+        (either
+          (\e -> Nothing <$ hPutStrLn stderr (show filename ++ ": " ++ show e))
+          (return . Just . baseHtml req mempty) <=< pandoc filename)
+        pt
+      let headers ct =
+            [ (hContentType, MT.renderHeader ct)
+            , (hLastModified, formatHTTPDate modtime)
+            ]
+      return $ maybe
+        (Wai.responseFile ok200 (headers mt) (unRawFilePath filename) Nothing)
+        (Wai.responseBuilder ok200 (headers htmlType) . Html.renderHtmlBuilder)
+        html
   query v = lookup v $ Wai.queryString req
   header n = lookup n $ Wai.requestHeaders req
 
