@@ -2,7 +2,7 @@
 
 import           Control.Applicative ((<|>))
 import           Control.Arrow (first)
-import           Control.Exception (bracket)
+import           Control.Exception (bracket, handle, SomeException)
 import           Control.Monad ((<=<), forM_, guard, join, when, mfilter)
 import           Control.Monad.Error.Class (throwError)
 import           Control.Monad.IO.Class (liftIO)
@@ -17,7 +17,7 @@ import           Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import           Data.Time.Format (formatTime, defaultTimeLocale)
 import qualified Network.HTTP.Media as MT
 import           Network.HTTP.Types.Header (hAccept, hContentType, hIfModifiedSince, hLastModified)
-import           Network.HTTP.Types.Status (ok200, notModified304, badRequest400, forbidden403, notFound404)
+import           Network.HTTP.Types.Status (ok200, notModified304, badRequest400, forbidden403, notFound404, internalServerError500)
 import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.FastCGI as Wai
 import           Numeric (showFFloat)
@@ -209,7 +209,10 @@ app req = do
   stat <- maybe (result $ Wai.responseLBS notFound404 [] "No such file or directory") return
     =<< statFile filename
   let (dirname, basename) = splitFileName filename
-  if BSC.null basename
+  handle (\e -> do
+    hPutStrLn stderr $ show filename ++ ": " ++ show (e :: SomeException)
+    return $ Wai.responseLBS internalServerError500 [] mempty)
+    $ if BSC.null basename
     then checkIndex stat dirname indexFiles
     else serve filename (dirname, basename) stat
   where
