@@ -61,7 +61,7 @@ indexFiles =
   , "README"]
 
 maxFiles :: Int
-maxFiles = 1000
+maxFiles = 10000
 
 statMatching :: Posix.FileStatus -> Posix.RawFilePath -> IO (Maybe Posix.FileStatus)
 statMatching match f = mfilter matches <$> statFile f where
