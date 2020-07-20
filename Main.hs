@@ -22,7 +22,7 @@ import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.FastCGI as Wai
 import           Numeric (showFFloat)
 import qualified System.Posix.ByteString as Posix
-import           System.Posix.FilePath ((</>), takeExtension, splitFileName)
+import           System.Posix.FilePath ((</>), takeExtension, splitFileName, takeDirectory)
 import           System.IO (hPutStrLn, stderr)
 import qualified System.IO.Error as IOE
 import qualified Text.Blaze.Html.Renderer.Utf8 as Html
@@ -258,7 +258,10 @@ app req = do
             , (hLastModified, formatHTTPDate modtime)
             ]
       return $ maybe
-        (Wai.responseFile ok200 (headers mt) (unRawFilePath filename) Nothing)
+        (maybe
+          (Wai.responseFile ok200 (headers mt) (unRawFilePath filename) Nothing)
+          (\u -> Wai.responseLBS ok200 (("X-Accel-Redirect", "/_" <> takeDirectory u </> basename) : headers mt) mempty)
+          (header "REQUEST_URI"))
         (Wai.responseBuilder ok200 (headers htmlType) . Html.renderHtmlBuilder)
         html
   query v = lookup v $ Wai.queryString req
