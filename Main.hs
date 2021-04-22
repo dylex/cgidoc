@@ -4,15 +4,16 @@ import           Control.Applicative ((<|>))
 import           Control.Arrow (first)
 import           Control.Exception (bracket, handle, SomeException)
 import           Control.Monad ((<=<), forM_, guard, join, when, mfilter)
-import           Control.Monad.Error.Class (throwError)
 import           Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.CaseInsensitive as CI
 import           Data.Fixed (Milli)
-import           Data.Monoid ((<>))
-import qualified Data.Text.IO as T.IO
+import           Data.List (elemIndex)
+import           Data.Maybe (mapMaybe)
+import qualified Data.Text as T
+import qualified Data.Text.IO as TIO
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import           Data.Time.Format (formatTime, defaultTimeLocale)
 import qualified Network.HTTP.Media as MT
@@ -82,13 +83,15 @@ readDirPlus dir = bracket (Posix.openDirStream dir) Posix.closeDirStream rdp whe
         _ -> loop (pred n) . maybe l ((l .) . (:) . (,) name) =<<
           statFile (dir </> name)
 
-pandoc :: Posix.RawFilePath -> String -> IO (Either Pandoc.PandocError H.Html)
+pandoc :: Posix.RawFilePath -> T.Text -> IO (Either Pandoc.PandocError H.Html)
 pandoc path fmt = Pandoc.runIO $ do
-  doc <- case Pandoc.getReader fmt of
-    Left e -> throwError $ Pandoc.PandocParseError $ "unknown format: " ++ e
-    Right (Pandoc.TextReader f, e) -> liftIO (T.IO.readFile $ unRawFilePath path) >>= f Pandoc.def{ Pandoc.readerExtensions = e }
-    Right (Pandoc.ByteStringReader f, e) -> liftIO (BSL.readFile $ unRawFilePath path) >>= f Pandoc.def{ Pandoc.readerExtensions = e }
+  rdr <- Pandoc.getReader fmt
+  doc <- case rdr of
+    (Pandoc.TextReader       f, e) -> liftIO (TIO.readFile path') >>= f Pandoc.def{ Pandoc.readerExtensions = e }
+    (Pandoc.ByteStringReader f, e) -> liftIO (BSL.readFile path') >>= f Pandoc.def{ Pandoc.readerExtensions = e }
   Pandoc.writeHtml5 Pandoc.def doc
+  where
+  path' = unRawFilePath path
 
 baseHtml :: Wai.Request -> H.Html -> H.Html -> H.Html
 baseHtml req hd bd = H.docTypeHtml $ do
@@ -121,6 +124,10 @@ byteSize = choose " KMGTPE" . realToFrac where
   sf :: Int -> Float -> ShowS
   sf = showFFloat . Just
 
+mintersperseMap :: Monoid m => m -> (a -> m) -> [a] -> m
+mintersperseMap _ _ [] = mempty
+mintersperseMap d f (x:l) = f x <> foldMap ((<>) d . f) l
+
 autoIndex :: Wai.Request -> [(Posix.RawFilePath, Posix.FileStatus)] -> H.Html
 autoIndex req dir = baseHtml req (do
     H.link
@@ -136,30 +143,30 @@ autoIndex req dir = baseHtml req (do
       $ mempty
     H.script
       H.! HA.defer mempty
-      H.! HA.src "https://use.fontawesome.com/releases/v5.7.0/js/all.js"
+      H.! HA.src "https://use.fontawesome.com/releases/v5.9.0/js/all.js"
       $ mempty
     H.script
       H.! HA.type_ "text/javascript"
-      $ "$(function(){$('#dir').DataTable({paging:false});})")
+      $ "$(document).ready(function(){$('#dir').DataTable({paging:false,order:["
+        <> mintersperseMap "," (\(d,o) -> "[" <> H.toMarkup o <> ",'" <> (if d then "a" else "de") <> "sc']") order <> "]});})")
   $ do
     H.table H.! HA.id "dir" $ do
       H.thead $ do
         H.tr $ do
           H.th H.! H.dataAttribute "width" "20px" H.! H.dataAttribute "class-name" "dt-body-right" $ mempty
           H.th H.! H.dataAttribute "class-name" "fixed" $ "name"
-          H.th H.! H.dataAttribute "class-name" "dt-body-right fixed" $ "size"
+          H.th H.! H.dataAttribute "class-name" "dt-body-right fixed" H.! H.dataAttribute "type" "num" $ "size"
           H.th "time"
       H.tbody $ do
         H.tr $ do
           H.td H.! H.dataAttribute "order" mempty $ H.span H.! HA.class_ "fas fa-folder" $ mempty
-          H.td $ H.a H.! HA.href "../" $ "../"
-          H.td mempty
-          H.td mempty
+          H.td H.! H.dataAttribute "order" ".." $ H.a H.! HA.href "../" $ "../"
+          H.td H.! H.dataAttribute "order" "0" $ mempty
+          H.td H.! H.dataAttribute "order" "0" $ mempty
         forM_ dir $ \(name, stat) -> do
           let
             isdir = Posix.isDirectory stat
-            size | isdir = Nothing
-                 | otherwise = Just $ Posix.fileSize stat
+            size = Posix.fileSize stat
             mtime = Posix.modificationTimeHiRes stat
             ext = takeExtension name
             name'
@@ -193,14 +200,21 @@ autoIndex req dir = baseHtml req (do
           H.tr $ do
             H.td H.! H.dataAttribute "order" (if isdir then "-" else if BS.null ext then "." else Html.byteStringValue ext) $
               H.span H.! HA.class_ ("fas fa-" <> icon ext) $ mempty
-            H.td $
+            H.td H.! H.dataAttribute "order" (Html.byteStringValue name) $
               H.a H.! HA.href (Html.byteStringValue name') $ Html.byteString name'
-            H.td H.! H.dataAttribute "order" (foldMap (H.stringValue . show) size) $
-              mapM_ (H.string . byteSize) size
+            H.td H.! H.dataAttribute "order" (H.stringValue $ show $ size) $
+              H.string $ byteSize $ size
             H.td H.! H.dataAttribute "order" (H.stringValue $ show $ (realToFrac mtime :: Milli)) $
               H.string $ formatTime defaultTimeLocale "%F %R %Z" $ posixSecondsToUTCTime mtime
   where
-  dtcdn = "https://cdn.datatables.net/v/dt/jq-3.3.1/dt-1.10.18/datatables.min."
+  dtcdn = "https://cdn.datatables.net/v/dt/jq-3.3.1/dt-1.10.24/datatables.min."
+  order = mapMaybe orders $ Wai.queryString req
+  orders ("order",Just f) = case BSC.uncons f of
+    Just ('+',s) -> (,) True <$> field s
+    Just ('-',s) -> (,) False <$> field s
+    _ -> (,) True <$> field f
+  orders _ = Nothing
+  field f = elemIndex f ["type","name","size","time"]
 
 app :: Wai.Request -> IO Wai.Response
 app req = do
@@ -251,7 +265,7 @@ app req = do
         (return Nothing)
         (either
           (\e -> Nothing <$ hPutStrLn stderr (show filename ++ ": " ++ show e))
-          (return . Just . baseHtml req mempty) <=< pandoc filename)
+          (return . Just . baseHtml req mempty) <=< pandoc filename . T.pack)
         pt
       let headers ct =
             [ (hContentType, MT.renderHeader ct)
