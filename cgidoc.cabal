@@ -1,9 +1,9 @@
 name:           cgidoc
 version:        0.1
-description:    Run pandoc under fastcgi
+description:    Build directory indexes and render documents under pandoc for static web servers through fastcgi
 author:         Dylan Simon
 maintainer:     dylan@dylex.net
-copyright:      2018 Dylan Simon, Flatiron Institute
+copyright:      2018-2021 Dylan Simon, Flatiron Institute
 license:        BSD3
 build-type:     Simple
 cabal-version:  >= 1.10
