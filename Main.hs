@@ -1,9 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-import           Control.Applicative ((<|>))
 import           Control.Arrow (first)
-import           Control.Exception (bracket, handle, SomeException)
-import           Control.Monad ((<=<), forM_, guard, join, when, mfilter)
+import           Control.Exception (bracket, handle, handleJust, SomeException)
+import           Control.Monad ((<=<), forM_, guard, join, mfilter)
 import           Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
@@ -18,13 +17,17 @@ import           Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import           Data.Time.Format (formatTime, defaultTimeLocale)
 import qualified Network.HTTP.Media as MT
 import           Network.HTTP.Types.Header (hAccept, hContentType, hIfModifiedSince, hLastModified)
-import           Network.HTTP.Types.Status (ok200, notModified304, badRequest400, forbidden403, notFound404, internalServerError500)
+import           Network.HTTP.Types.Status (ok200, notModified304, forbidden403, notFound404, internalServerError500)
+import qualified Network.Socket as Net
 import qualified Network.Wai as Wai
-import qualified Network.Wai.Handler.FastCGI as Wai
+import qualified Network.Wai.Handler.Warp as Warp
+import qualified Network.Wai.Middleware.RequestLogger as WLog
 import           Numeric (showFFloat)
+import           System.Environment (getArgs)
 import qualified System.Posix.ByteString as Posix
 import           System.Posix.FilePath ((</>), takeExtension, splitFileName, takeDirectory)
-import           System.IO (hPutStrLn, stderr)
+import           System.Posix.Files (removeLink)
+import           System.IO (stderr)
 import qualified System.IO.Error as IOE
 import qualified Text.Blaze.Html.Renderer.Utf8 as Html
 import qualified Text.Blaze.Html5 as H
@@ -34,7 +37,6 @@ import qualified Text.Pandoc as Pandoc
 import qualified Waimwork.Blaze as Html
 import           Waimwork.HTTP (formatHTTPDate, parseHTTPDate)
 import           Waimwork.Response (okResponse)
-import           Waimwork.Result (result, resultApplication)
 
 unRawFilePath :: Posix.RawFilePath -> FilePath
 unRawFilePath = BSC.unpack -- XXX unsafe encoding
@@ -217,28 +219,26 @@ autoIndex req dir = baseHtml req (do
   field f = elemIndex f ["type","name","size","time"]
 
 app :: Wai.Request -> IO Wai.Response
-app req = do
-  filename <- maybe (result $ Wai.responseLBS badRequest400 [] "") return
-    $ header "REQUEST_FILENAME" <|> header "SCRIPT_FILENAME"
-  stat <- maybe (result $ Wai.responseLBS notFound404 [] "No such file or directory") return
-    =<< statFile filename
-  let (dirname, basename) = splitFileName filename
-  handle (\e -> do
-    hPutStrLn stderr $ show filename ++ ": " ++ show (e :: SomeException)
+app req = statFile filename >>= maybe
+  (return $ Wai.responseLBS notFound404 [] "No such file or directory")
+  (\stat -> handle (\e -> do
+    BSC.hPutStrLn stderr $ filename <> ": " <> BSC.pack (show (e :: SomeException))
     return $ Wai.responseLBS internalServerError500 [] mempty)
     $ if BSC.null basename
     then checkIndex stat dirname indexFiles
-    else serve filename (dirname, basename) stat
+    else serve filename (dirname, basename) stat)
   where
+  filename = Wai.rawPathInfo req
+  (dirname, basename) = splitFileName filename
   checkIndex _ _ [] = return $ Wai.responseLBS forbidden403 [] "Permission denied"
   checkIndex stat dir (file:files) = maybe
     (checkIndex stat dir files)
-    (serve filename (dir, file))
+    (serve filepath (dir, file))
     =<< (if file == autoIndexFileRec
       then checkParents stat dir
-      else id) (statMatching stat filename)
+      else id) (statMatching stat filepath)
     where
-    filename = dir </> file
+    filepath = dir </> file
   checkParents stat dir pre = pre >>= maybe
     (maybe
       (return Nothing)
@@ -248,36 +248,36 @@ app req = do
     (return . Just)
     where
     parent = dir </> ".."
-  serve filename (dirname, basename) stat
-    | Posix.fileSize stat == 0 && basename `elem` autoIndexFiles =
-      okResponse [] . autoIndex req <$> readDirPlus dirname
-    | otherwise = do
-      let modtime = posixSecondsToUTCTime $ Posix.modificationTimeHiRes stat
-      when (any (modtime <=) $ parseHTTPDate =<< header hIfModifiedSince) $
-        result $ Wai.responseLBS notModified304 [] ""
-      let (pt, mt) =
-            first (>>= \pt' -> do
-              accept <- header hAccept
-              guard $ all (`notElem` [Nothing, Just "1"]) $ query "raw"
-              join $ MT.mapAcceptMedia [(mt, Nothing), (htmlType, Just pt')] accept)
-            $ fileType $ takeExtension filename
-      html <- maybe
-        (return Nothing)
-        (either
-          (\e -> Nothing <$ hPutStrLn stderr (show filename ++ ": " ++ show e))
-          (return . Just . baseHtml req mempty) <=< pandoc filename . T.pack)
-        pt
-      let headers ct =
-            [ (hContentType, MT.renderHeader ct)
-            , (hLastModified, formatHTTPDate modtime)
-            ]
-      return $ maybe
+  serve file (dir, base) stat
+    | Posix.fileSize stat == 0 && base `elem` autoIndexFiles =
+      okResponse [] . autoIndex req <$> readDirPlus dir
+    | any (modtime <=) $ parseHTTPDate =<< header hIfModifiedSince =
+      return $ Wai.responseLBS notModified304 [] ""
+    | otherwise =
+      maybe
         (maybe
-          (Wai.responseFile ok200 (headers mt) (unRawFilePath filename) Nothing)
-          (\u -> Wai.responseLBS ok200 (("X-Accel-Redirect", "/_" <> takeDirectory u </> basename) : headers mt) mempty)
+          (Wai.responseFile ok200 (headers mt) (unRawFilePath file) Nothing)
+          (\u -> Wai.responseLBS ok200 (("X-Accel-Redirect", "/_" <> takeDirectory u </> base) : headers mt) mempty)
           (header "REQUEST_URI"))
         (Wai.responseBuilder ok200 (headers htmlType) . Html.renderHtmlBuilder)
-        html
+      <$> maybe
+        (return Nothing)
+        (either
+          (\e -> Nothing <$ BSC.hPutStrLn stderr (file <> ": " <> BSC.pack (show e)))
+          (return . Just . baseHtml req mempty) <=< pandoc file . T.pack)
+        pt
+      where
+      modtime = posixSecondsToUTCTime $ Posix.modificationTimeHiRes stat
+      (pt, mt) =
+        first (>>= \pt' -> do
+          accept <- header hAccept
+          guard $ all (`notElem` [Nothing, Just "1"]) $ query "raw"
+          join $ MT.mapAcceptMedia [(mt, Nothing), (htmlType, Just pt')] accept)
+        $ fileType $ takeExtension file
+      headers ct =
+        [ (hContentType, MT.renderHeader ct)
+        , (hLastModified, formatHTTPDate modtime)
+        ]
   query v = lookup v $ Wai.queryString req
   header n = lookup n $ Wai.requestHeaders req
 
@@ -285,4 +285,15 @@ _apptest :: Wai.Request -> IO Wai.Response
 _apptest = return . okResponse [] . BSC.unlines . map (\(h,v) -> CI.original h <> "=" <> v) . Wai.requestHeaders
 
 main :: IO ()
-main = Wai.run $ resultApplication app
+main = do
+  [arg] <- getArgs
+  handleJust (guard . IOE.isDoesNotExistError) return $ removeLink arg
+  sock <- Net.socket Net.AF_UNIX Net.Stream Net.defaultProtocol
+  Net.bind sock $ Net.SockAddrUnix arg
+  Net.listen sock 4
+  logger <- WLog.mkRequestLogger WLog.defaultRequestLoggerSettings
+    { WLog.outputFormat = WLog.Apache WLog.FromHeader
+    }
+  Warp.runSettingsSocket Warp.defaultSettings sock
+    $ logger
+    $ (>>=) . app

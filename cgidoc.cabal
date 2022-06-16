@@ -13,7 +13,7 @@ executable cgidoc
   other-modules:
   hs-source-dirs: .
   default-language: Haskell2010
-  ghc-options: -Wall -threaded
+  ghc-options: -O -Wall -threaded
   build-depends:
       base >= 4.7 && < 5
     , attoparsec
@@ -23,11 +23,13 @@ executable cgidoc
     , http-media
     , http-types
     , mtl
+    , network
     , pandoc
     , posix-paths
     , text
     , time
     , unix
     , wai
-    , wai-handler-fastcgi
+    , wai-extra
+    , warp
     , waimwork
