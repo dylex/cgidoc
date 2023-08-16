@@ -1,4 +1,4 @@
-FROM fpco/stack-build-small:lts-18.28 AS build
+FROM fpco/stack-build-small:lts-19.33 AS build
 WORKDIR /tmp/cgidoc
 COPY stack.yaml *.cabal ./
 RUN stack build --system-ghc --dependencies-only
